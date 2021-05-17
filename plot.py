@@ -11,7 +11,7 @@ import matplotlib
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-
+from matplotlib.collections import LineCollection
 
 import folium
 from folium.features import DivIcon
@@ -40,6 +40,7 @@ def _get_waypoint_data(waypoint):
 
 
 def get_waypoints_from_gpx(gpxfile):
+    """ Waypoints are gps coords given by watch for laps """
     waypointdata = []
     for waypoint in minidom.parse(gpxfile).getElementsByTagName("wpt"):
         waypointdata.append(_get_waypoint_data(waypoint))
@@ -140,14 +141,33 @@ def speed_dist(duration, speeds):
     return dist_km
 
 
-def main():
-    # fitfile = './B5CE0704.fit'
-    # convert_fit_to_gpx(fitfile)
+def get_km_indices(dist):
+    km = 1
+    indices = []
+    for i in range(len(dist) - 1):
+        if dist[i] < km and dist[i+1] > km:
+            indices.append(i)
+            km += 1
+    return indices
 
-    gpxfile = './qmapshack_export.gpx'
-    tracks = process_gpx_file(gpxfile)
-    waypointdata = get_waypoints_from_gpx(gpxfile)
 
+def interpolate_km(t1, t2, d1, d2):
+    km1 = int(d1)
+    km2 = int(d2)
+    assert km1 is not km2
+    dt = t2 - t1
+    length = d2 - d1
+    dx = km2 - d1
+    return dx/length*dt, km2
+
+
+def pacetime(seconds):
+    minutes, rest = divmod(seconds, 60)
+    seconds = int(rest)
+    return f"{int(minutes)}:{int(seconds):02d}"
+
+
+def flatten_tracks(tracks):
     flat = []
     num_tracks = int(len(tracks))
     print(f"have {num_tracks} tracks")
@@ -156,53 +176,109 @@ def main():
         print(f"Track has {num_seg} segments")
         for seg in track.segments:
             flat = flat + seg.datapoints
+    return flat
 
 
-    p1 = tracks[0].segments[0].datapoints[-1]
-    p2 = tracks[0].segments[1].datapoints[0]
+def main():
+    # fitfile = './B5CE0704.fit'
+    # convert_fit_to_gpx(fitfile)
 
+    gpxfile = './qmapshack_export.gpx'
+    # alpha: parameter to merge gps and speed based dist. d = alpha*gps_dist + (1-alpha)*speed_dist
+    alpha = 1/2
+    tracks = process_gpx_file(gpxfile)
+    flat = flatten_tracks(tracks)
 
     datetimes = [datetime.strptime(dp['time'], '%Y-%m-%dT%H:%M:%S.000Z') for dp in flat]
-    total_time = (datetimes[-1] - datetimes[0]).total_seconds()/(60*60)  # in h
-    duration_sec = [ (d - datetimes[0]).total_seconds() for d in datetimes]
-    duration_plot = [mdates.date2num(d) - mdates.date2num(datetimes[0]) for d in datetimes]
-    speeds_mps = [dp['speed'] for dp in flat]
-    speeds_kmh = [3.6*s for s in speeds_mps]  # m/s, need km/h
-    paces = [(16+2/3)/dp['speed'] for dp in flat]
+    duration_sec = [(d - datetimes[0]).total_seconds() for d in datetimes]
+
+    speeds_mps = [dp['speed'] for dp in flat]  # m/s
+    # speeds_kmh = [3.6*s for s in speeds_mps]  # m/s to km/h
+    paces = [(16+2/3)/dp['speed'] for dp in flat]  # m/s to min/km
+
     elevation = [dp['ele'] for dp in flat]
 
     dist_gps = gps_dist(flat)
     dist_speed = speed_dist(duration_sec, speeds_mps)
-    dist = [1/2*(d1 + d2) for d1, d2 in zip(dist_gps, dist_speed)]
+    dist = [alpha*d1 + (1 - alpha)*d2 for d1, d2 in zip(dist_gps, dist_speed)]
+    # dist = dist_gps
+    
+    km_datetimes = []
+    for i in get_km_indices(dist):
+        dt, km = interpolate_km(duration_sec[i], duration_sec[i+1], dist[i], dist[i+1])
+        km_datetimes.append(datetimes[i] + timedelta(seconds=dt))
 
+    average_paces = [(km_datetimes[0] - datetimes[0]).total_seconds()]
+    for index, time in enumerate(km_datetimes[1:]):
+        average_paces.append((time - km_datetimes[index]).total_seconds())
+    average_paces_minutes = [seconds/60 for seconds in average_paces]
+    average_paces_strings = [pacetime(seconds) for seconds in average_paces]
 
-
-    average_pace = 60/(dist[-1]/total_time)
+    for index, avp in enumerate(average_paces_strings):
+        print(f"KM {index+1}: {avp}")
     print(f"Length: {dist[-1]:.2f}")
-    d, r = divmod(total_time, 1)
-    r1, r2 = divmod(60*r, 1)
-    print(f"Time: {int(d)}:{int(r1)}:{r2*60:.0f}")
-    d, r = divmod(average_pace, 1)
-    print(f"Average pace {int(d)}:{r*60:.0f}")
+    total_time = (datetimes[-1] - datetimes[0]).total_seconds()/(60*60)  # in h
+    total_time_h, r = divmod(total_time, 1)
+    total_time_min, sec_percentage = divmod(60*r, 1)
+    sec = sec_percentage*60
+    total_time_str = f"{int(total_time_h)}:{int(total_time_min)}:{sec:.0f}"
+    print("Time: " + total_time_str)
+    average_pace = 60/(dist[-1]/total_time)
+    avg_pace_min, r = divmod(average_pace, 1)
+    avg_pace_sec = r*60
+    avg_pace_str = f"{int(avg_pace_min)}:{avg_pace_sec:.0f}"
+    print("Average pace: " + avg_pace_str)
+    p1 = tracks[0].segments[0].datapoints[-1]
+    p2 = tracks[0].segments[1].datapoints[0]
     offset = get_dist_gps(p1, p2)
     print(f"Offset due to multiple segments {offset}km")
-    average_pace_list = [average_pace for dp in flat]
-
 
     hr = [dp['hr'] for dp in flat]
+
     fig, ax = plt.subplots()
     # ax.set_ylim([100, 190])
 
     # ax.xaxis.set_major_formatter(mdates.DateFormatter('%H-%M'))
     # ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=2))
     # ax.xaxis.set_minor_locator(mdates.SecondLocator(interval=30))
+
+    # Times as x-ax:
+    # duration_plot = [mdates.date2num(d) - mdates.date2num(datetimes[0]) for d in datetimes]
+    # km_plot = [mdates.date2num(d) - mdates.date2num(datetimes[0]) for d in km_datetimes]
+
     # ax.plot(duration_plot, hr)
     # ax.plot(duration_plot, speeds_kmh)
     # ax.plot(duration_plot, elevation)
+    # for km_time in km_plot:
+    #     ax.plot([km_time, km_time], [0, 5], color='black')
     # fig.autofmt_xdate()
 
-    ax.plot(dist, average_pace_list, ls='--')
+    # ax.plot(dist, average_pace_list, ls='--')
+    hr = np.array(hr)
+    elevation = np.array(elevation)
+    points = np.array([dist, elevation]).T.reshape(-1, 1, 2)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+    cmap = plt.cm.jet
+    lc = LineCollection(segments, cmap=cmap,
+                        norm=plt.Normalize(min(hr), max(hr)))
+    lc.set_array(hr)
+    lc.set_linewidth(3)
+
+    ax.set_title(f"Distance: {dist[-1]:.2f}, Time: {total_time_str}, avg pace: {avg_pace_str}")
+    lowlim = 3
     ax.plot(dist, paces)
+    ax.set_ylim([lowlim, 9])
+    ax2 = ax.twinx()
+    line = ax2.add_collection(lc)
+    fig.colorbar(line)
+    ax2.set_ylim(elevation.min() - 10/1000, elevation.max() + 10/1000)
+    for i, pace in enumerate(average_paces_minutes):
+        ax.plot([i, i+1], [pace, pace], color='blue', ls='--')
+        ax.plot([i, i], [0, pace], color='blue', ls='--')
+        ax.plot([i+1, i+1], [0, pace], color='blue', ls='--')
+        ax.text(i+1/2, lowlim + 1/2*(pace - lowlim), average_paces_strings[i])
+
+    # ax2.plot(dist, elevation, color='brown')
 
     # ax.format_xdata = mdates.DateFormatter('%M-%S')
     plt.show()
