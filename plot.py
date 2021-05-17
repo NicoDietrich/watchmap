@@ -12,6 +12,8 @@ import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.collections import LineCollection
+from matplotlib.legend_handler import HandlerLineCollection
+from matplotlib.backends.backend_pdf import PdfPages
 
 import folium
 from folium.features import DivIcon
@@ -179,11 +181,28 @@ def flatten_tracks(tracks):
     return flat
 
 
+class HandlerColorLineCollection(HandlerLineCollection):
+    """ see https://stackoverflow.com/questions/49223702/
+            adding-a-legend-to-a-matplotlib-plot-with-a-multicolored-line """
+    def create_artists(self, legend, artist, xdescent, ydescent,
+                       width, height, fontsize, trans):
+        x = np.linspace(0, width, self.get_numpoints(legend)+1)
+        y = np.zeros(self.get_numpoints(legend)+1)+height/2.-ydescent
+        points = np.array([x, y]).T.reshape(-1, 1, 2)
+        segments = np.concatenate([points[:-1], points[1:]], axis=1)
+        lc = LineCollection(segments, cmap=artist.cmap,
+                     transform=trans)
+        lc.set_array(x)
+        lc.set_linewidth(artist.get_linewidth())
+        return [lc]
+
+
 def main():
     # fitfile = './B5CE0704.fit'
     # convert_fit_to_gpx(fitfile)
 
     gpxfile = './qmapshack_export.gpx'
+    pdffile = gpxfile.replace('.gpx', '.pdf')
     # alpha: parameter to merge gps and speed based dist. d = alpha*gps_dist + (1-alpha)*speed_dist
     alpha = 1/2
     tracks = process_gpx_file(gpxfile)
@@ -213,6 +232,7 @@ def main():
         average_paces.append((time - km_datetimes[index]).total_seconds())
     average_paces_minutes = [seconds/60 for seconds in average_paces]
     average_paces_strings = [pacetime(seconds) for seconds in average_paces]
+    seconds_for_last_part = (datetimes[-1] - km_datetimes[-1]).total_seconds()
 
     for index, avp in enumerate(average_paces_strings):
         print(f"KM {index+1}: {avp}")
@@ -235,7 +255,7 @@ def main():
 
     hr = [dp['hr'] for dp in flat]
 
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(10, 5))
     # ax.set_ylim([100, 190])
 
     # ax.xaxis.set_major_formatter(mdates.DateFormatter('%H-%M'))
@@ -266,22 +286,44 @@ def main():
 
     ax.set_title(f"Distance: {dist[-1]:.2f}, Time: {total_time_str}, avg pace: {avg_pace_str}")
     lowlim = 3
-    ax.plot(dist, paces)
+    ax.plot(dist, paces, label='pace')
+    # ax.legend()
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend([lc] + handles, ["elevation/hr"]+labels,
+              handler_map={lc: HandlerColorLineCollection(numpoints=6)},
+              framealpha=1)
+    # ax.legend([lc] + handles, ["elevation/hr"]+labels,
+    #           handler_map={lc: HandlerColorLineCollection(numpoints=6),
+    #                        paceline: HandlerLineCollection()},
+    #           framealpha=1)
     ax.set_ylim([lowlim, 9])
     ax2 = ax.twinx()
     line = ax2.add_collection(lc)
-    fig.colorbar(line)
-    ax2.set_ylim(elevation.min() - 10/1000, elevation.max() + 10/1000)
-    for i, pace in enumerate(average_paces_minutes):
-        ax.plot([i, i+1], [pace, pace], color='blue', ls='--')
-        ax.plot([i, i], [0, pace], color='blue', ls='--')
-        ax.plot([i+1, i+1], [0, pace], color='blue', ls='--')
-        ax.text(i+1/2, lowlim + 1/2*(pace - lowlim), average_paces_strings[i])
+    cb = fig.colorbar(line, location='left')
+    ax2.set_ylim(elevation.min() - 10, elevation.max() + 10)
+    for i, pace in enumerate(average_paces_strings):
+        # ax.plot([i, i+1], [pace, pace], color='blue', ls='--')
+        # ax.plot([i, i], [0, pace], color='blue', ls='--')
+        # ax.plot([i+1, i+1], [0, pace], color='blue', ls='--')
+        ax.text(i+1/5, lowlim + 0.1, pace)
+    ax.text(int(dist[-1])+1/5, lowlim + 0.1, pacetime(seconds_for_last_part))
+    ax.set_xticks([i for i in range(int(dist[-1])+1)] + [dist[-1]])
+    ax.set_xticklabels([f'{i:.2f}' for i in (list(range(int(dist[-1])+1)) + [dist[-1]])])
+    ax.set_xlabel('km')
+    ax.set_ylabel('m/km')
+    ax2.set_ylabel('m')
+    cb.set_label('hr')
+    ax.grid(True)
+    fig.tight_layout()
 
+    with PdfPages(pdffile) as export_pdf:
+        export_pdf.savefig(fig)
+    subprocess.call(["convert", "-density", "300", pdffile,
+                     "-resize", "100%", pdffile.replace('.pdf', '.png')])
     # ax2.plot(dist, elevation, color='brown')
 
     # ax.format_xdata = mdates.DateFormatter('%M-%S')
-    plt.show()
+    # plt.show()
 
 
 if __name__ == "__main__":
